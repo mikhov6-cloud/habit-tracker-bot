@@ -34,7 +34,7 @@ Built as a portfolio project for bot development / QA / support roles.
 ### 2. Install
 
 ```bash
-git clone https://github.com/<your-username>/habit-tracker-bot.git
+git clone https://github.com/mikhov6-cloud/habit-tracker-bot.git
 cd habit-tracker-bot
 python -m venv .venv
 source .venv/bin/activate  # Windows: .venv\Scripts\activate
