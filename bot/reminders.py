@@ -7,7 +7,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
-from bot.db import Database, format_habit_line
+from bot.db import Database, format_days, format_habit_line
 
 log = logging.getLogger(__name__)
 
@@ -15,12 +15,7 @@ log = logging.getLogger(__name__)
 def reminder_keyboard(habit_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Сделано",
-                    callback_data=f"done:{habit_id}",
-                )
-            ]
+            [InlineKeyboardButton(text="✅ Сделано", callback_data=f"done:{habit_id}")]
         ]
     )
 
@@ -32,25 +27,24 @@ def format_reminder_text(item: dict) -> str:
             "schedule_time": item.get("schedule_time"),
             "note": item.get("note"),
             "remind": 1,
-        }
+            "days_mask": item.get("days_mask"),
+        },
+        short=True,
     )
-    note = f"\n📝 {item['note']}" if item.get("note") else ""
-    return (
-        "🔔 Напоминание\n"
-        f"{line}{note}\n\n"
-        "Пора отметить привычку — жми «Сделано»."
-    )
+    days = format_days(item.get("days_mask"))
+    extra = f" · {days}" if days != "каждый день" else ""
+    note = f"\n{item['note']}" if item.get("note") else ""
+    return f"🔔 {line}{extra}{note}"
 
 
 async def send_due_reminders(bot: Bot, db: Database) -> int:
     due = await db.list_due_reminders()
     sent = 0
     for item in due:
-        text = format_reminder_text(item)
         try:
             await bot.send_message(
                 chat_id=item["user_id"],
-                text=text,
+                text=format_reminder_text(item),
                 reply_markup=reminder_keyboard(item["habit_id"]),
             )
             await db.mark_reminder_sent(item["habit_id"], item["day"])

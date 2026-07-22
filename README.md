@@ -1,89 +1,46 @@
 # Habit Tracker Telegram Bot
 
-Минимальный Telegram-бот для привычек: добавить, отметить, стрики, статистика, **напоминания**.
+Telegram-бот привычек: кнопки, дни недели, напоминания, правка, пауза.
 
-UI на русском, управление кнопками + пошаговый мастер.
+## Умеет
 
-Portfolio project for bot / QA / support roles.
+- ➕ wizard: имя → **дни** → время → заметка
+- дни: каждый / будни / выходные / свои (Пн–Вс)
+- ✔️ отметить + ↩ отменить отметку
+- ✏️ править: дни, время, заметка, имя, 🔔, ⏸ пауза
+- 🔔 напоминания только в нужные дни + локальный пояс
+- ✅ сегодня — только привычки на этот день (без паузы)
+- стрик считается **только по своим дням** (зал Пн/Ср/Пт не ломается во вторник)
+- стата: стрик · за неделю · всего
 
-## Features
+## Стек
 
-- Русское меню-кнопки
-- ➕ **Добавить** — wizard: название → время → заметка
-- ✔️ **Отметить** / 🗑 **Удалить** — inline-список
-- 🔔 **Напоминания**
-  - часовой пояс (по умолчанию `Europe/Moscow`)
-  - вкл/выкл по каждой привычке
-  - пуш в локальное время привычки + кнопка «Сделано»
-  - не дублирует, если уже отмечено сегодня
-- ✅ Сегодня, 📊 Статистика, 📋 Привычки
-- SQLite + unit-тесты
+Python 3.12 · aiogram 3 · SQLite · asyncio reminder loop
 
-## Stack
-
-- Python 3.12
-- aiogram 3 + FSM
-- background reminder loop (`asyncio`, every 30s)
-- SQLite / aiosqlite
-- zoneinfo for timezones
-
-## Quick start (local)
+## Локально
 
 ```bash
 git clone https://github.com/mikhov6-cloud/habit-tracker-bot.git
 cd habit-tracker-bot
-python -m venv .venv
-source .venv/bin/activate
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # BOT_TOKEN=...
 python -m bot.main
-```
-
-Tests:
-
-```bash
 python -m unittest discover -s tests -v
 ```
 
-## How reminders work
+## Railway
 
-1. Добавь привычку с временем (например `18:00`) → 🔔 включается сам.
-2. Кнопка **🔔 Напоминания**:
-   - смени пояс (Москва / Киев / …)
-   - тап по привычке = вкл/выкл
-3. В нужную минуту бот пишет:
+`Dockerfile` + `railway.toml`  
+Vars: `BOT_TOKEN`, optional `DATABASE_PATH=/app/data/habits.db` + volume `/app/data`  
+Один токен = один инстанс.
 
-```text
-🔔 Напоминание
-Зал · 🔔 18:00 · (ноги)
+## Пример: зал 3 раза в неделю
 
-Пора отметить привычку — жми «Сделано».
-[ ✅ Сделано ]
-```
-
-4. Один раз в день на привычку. Если уже `/done` — молчит.
-
-Check-ins и «сегодня» считаются в **локальном поясе пользователя** (не UTC).
-
-## Deploy (Railway)
-
-1. Deploy from GitHub `habit-tracker-bot`
-2. `BOT_TOKEN=...`
-3. optional `DATABASE_PATH=/app/data/habits.db` + volume `/app/data`
-4. Logs: `Habit tracker bot started` and `reminder loop started`
-
-One token = one instance.
-
-## Project layout
-
-```text
-bot/
-  main.py        # polling + reminder task
-  handlers.py    # RU UI / FSM / callbacks
-  reminders.py   # due checks + send
-  db.py
-  keyboards.py
-```
+1. ➕ Добавить → `Зал`
+2. дни → **Выбрать дни** → Пн Ср Пт → Готово
+3. время `18:00` → заметка `ноги/груд/спина`
+4. 🔔 придёт только в эти дни
 
 ## License
 

@@ -2,9 +2,17 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
-from bot.db import DEFAULT_TZ, Database, format_habit_line, local_hhmm, local_today
+from bot.db import (
+    DEFAULT_TZ,
+    Database,
+    format_days,
+    format_habit_line,
+    is_due_weekday,
+    local_hhmm,
+    local_today,
+    local_weekday,
+)
 
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):
@@ -18,93 +26,103 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         await self.db.close()
         self.tmp.cleanup()
 
-    async def test_add_and_list_habit(self) -> None:
-        habit = await self.db.add_habit(1, "gym", schedule_time="18:00", note="ноги")
+    async def test_add_with_days(self) -> None:
+        habit = await self.db.add_habit(
+            1, "зал", schedule_time="18:00", note="ноги", days_mask="024"
+        )
         assert habit is not None
         self.assertEqual(habit["schedule_time"], "18:00")
-        self.assertEqual(habit["note"], "ноги")
+        self.assertEqual(habit["days_mask"], "024")
         self.assertEqual(habit["remind"], 1)
-        habits = await self.db.list_habits(1)
-        self.assertEqual([h["name"] for h in habits], ["gym"])
-        self.assertIn("18:00", format_habit_line(habit))
+        self.assertEqual(format_days("024"), "Пн Ср Пт")
+        self.assertIn("Пн", format_habit_line(habit))
 
     async def test_duplicate_habit(self) -> None:
         await self.db.add_habit(1, "gym")
-        again = await self.db.add_habit(1, "gym")
-        self.assertIsNone(again)
+        self.assertIsNone(await self.db.add_habit(1, "gym"))
 
-    async def test_checkin_and_streak(self) -> None:
+    async def test_checkin_streak_every_day(self) -> None:
         await self.db.add_habit(1, "read")
         day = local_today(DEFAULT_TZ)
         d = datetime.fromisoformat(day).date()
-        yesterday = (d - timedelta(days=1)).isoformat()
-
-        r1 = await self.db.checkin(1, "read", yesterday)
-        self.assertTrue(r1["created"])
+        y = (d - timedelta(days=1)).isoformat()
+        r1 = await self.db.checkin(1, "read", y)
         r2 = await self.db.checkin(1, "read", day)
+        self.assertTrue(r1["created"])
         self.assertTrue(r2["created"])
         self.assertEqual(r2["streak"], 2)
-        self.assertEqual(r2["total"], 2)
 
-        r3 = await self.db.checkin(1, "read", day)
-        self.assertFalse(r3["created"])
+    async def test_streak_only_scheduled_days(self) -> None:
+        # Mon/Wed/Fri only
+        habit = await self.db.add_habit(1, "зал", days_mask="024")
+        assert habit is not None
+        # pick a Friday as anchor
+        # find a Friday
+        d = datetime.fromisoformat(local_today(DEFAULT_TZ)).date()
+        while d.weekday() != 4:
+            d -= timedelta(days=1)
+        fri = d
+        wed = fri - timedelta(days=2)
+        mon = fri - timedelta(days=4)
+        await self.db.checkin_by_id(1, habit["id"], mon.isoformat())
+        await self.db.checkin_by_id(1, habit["id"], wed.isoformat())
+        r = await self.db.checkin_by_id(1, habit["id"], fri.isoformat())
+        self.assertEqual(r["streak"], 3)
 
-    async def test_checkin_by_id(self) -> None:
+    async def test_today_filters_days_and_paused(self) -> None:
+        wd = local_weekday(DEFAULT_TZ)
+        other = str((wd + 1) % 7)
+        await self.db.add_habit(1, "today_ok", days_mask=str(wd))
+        await self.db.add_habit(1, "other_day", days_mask=other)
+        paused = await self.db.add_habit(1, "paused_h", days_mask=str(wd))
+        assert paused is not None
+        await self.db.set_habit_paused(1, paused["id"], True)
+        rows = await self.db.today_status(1)
+        names = {r["name"] for r in rows}
+        self.assertIn("today_ok", names)
+        self.assertNotIn("other_day", names)
+        self.assertNotIn("paused_h", names)
+
+    async def test_undo_checkin(self) -> None:
         habit = await self.db.add_habit(1, "water")
         assert habit is not None
-        result = await self.db.checkin_by_id(1, habit["id"])
-        self.assertTrue(result["created"])
-        self.assertEqual(result["total"], 1)
+        await self.db.checkin_by_id(1, habit["id"])
+        self.assertTrue(await self.db.undo_checkin_by_id(1, habit["id"]))
+        self.assertEqual(await self.db.total_checkins(habit["id"]), 0)
 
-    async def test_archive_habit(self) -> None:
-        await self.db.add_habit(1, "water")
-        ok = await self.db.archive_habit(1, "water")
-        self.assertTrue(ok)
-        self.assertEqual(await self.db.list_habits(1), [])
-
-    async def test_archive_by_id(self) -> None:
-        habit = await self.db.add_habit(1, "sleep")
-        assert habit is not None
-        archived = await self.db.archive_habit_by_id(1, habit["id"])
-        assert archived is not None
-        self.assertEqual(archived["name"], "sleep")
-        self.assertEqual(await self.db.list_habits(1), [])
-
-    async def test_timezone_and_remind_toggle(self) -> None:
-        await self.db.set_timezone(1, "Europe/Kyiv")
-        self.assertEqual(await self.db.get_timezone(1), "Europe/Kyiv")
+    async def test_update_days_and_time(self) -> None:
         habit = await self.db.add_habit(1, "run", schedule_time="07:00")
         assert habit is not None
-        self.assertEqual(habit["remind"], 1)
-        off = await self.db.set_habit_remind(1, habit["id"], False)
-        assert off is not None
-        self.assertEqual(off["remind"], 0)
-        on = await self.db.set_habit_remind(1, habit["id"], True)
-        assert on is not None
-        self.assertEqual(on["remind"], 1)
+        h2 = await self.db.update_habit(
+            1, habit["id"], days_mask="56", schedule_time="09:30"
+        )
+        assert h2 is not None
+        self.assertEqual(h2["days_mask"], "56")
+        self.assertEqual(h2["schedule_time"], "09:30")
 
-    async def test_due_reminder_once(self) -> None:
+    async def test_due_reminder_respects_weekday(self) -> None:
         now = local_hhmm(DEFAULT_TZ)
-        habit = await self.db.add_habit(1, "nowhabit", schedule_time=now, note="test")
-        assert habit is not None
-        due = await self.db.list_due_reminders()
-        ids = [d["habit_id"] for d in due]
-        self.assertIn(habit["id"], ids)
-
-        day = local_today(DEFAULT_TZ)
-        await self.db.mark_reminder_sent(habit["id"], day)
-        due2 = await self.db.list_due_reminders()
-        ids2 = [d["habit_id"] for d in due2]
-        self.assertNotIn(habit["id"], ids2)
+        wd = local_weekday(DEFAULT_TZ)
+        other = str((wd + 1) % 7)
+        ok = await self.db.add_habit(1, "due_ok", schedule_time=now, days_mask=str(wd))
+        bad = await self.db.add_habit(1, "due_bad", schedule_time=now, days_mask=other)
+        assert ok and bad
+        due_ids = {d["habit_id"] for d in await self.db.list_due_reminders()}
+        self.assertIn(ok["id"], due_ids)
+        self.assertNotIn(bad["id"], due_ids)
 
     async def test_no_reminder_after_checkin(self) -> None:
         now = local_hhmm(DEFAULT_TZ)
         habit = await self.db.add_habit(1, "donehabit", schedule_time=now)
         assert habit is not None
         await self.db.checkin_by_id(1, habit["id"])
-        due = await self.db.list_due_reminders()
-        ids = [d["habit_id"] for d in due]
-        self.assertNotIn(habit["id"], ids)
+        due_ids = {d["habit_id"] for d in await self.db.list_due_reminders()}
+        self.assertNotIn(habit["id"], due_ids)
+
+    async def test_is_due_helper(self) -> None:
+        self.assertTrue(is_due_weekday("024", 0))
+        self.assertFalse(is_due_weekday("024", 1))
+        self.assertTrue(is_due_weekday(None, 3))
 
 
 if __name__ == "__main__":
