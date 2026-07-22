@@ -23,12 +23,12 @@ async def cmd_start(message: Message, db: Database) -> None:
     await message.answer(
         "Habit Tracker bot.\n\n"
         "Commands:\n"
-        "/add <name> — create habit\n"
-        "/done <name> — check in today\n"
+        "/add NAME — create habit\n"
+        "/done NAME — check in today\n"
         "/habits — list habits\n"
         "/today — today's progress\n"
         "/stats — streaks and totals\n"
-        "/delete <name> — archive habit\n"
+        "/delete NAME — archive habit\n"
         "/help — command list\n\n"
         "Example:\n"
         "/add gym\n"
@@ -42,12 +42,12 @@ async def cmd_start(message: Message, db: Database) -> None:
 async def cmd_help(message: Message) -> None:
     await message.answer(
         "Commands:\n"
-        "/add <name>\n"
-        "/done <name>\n"
+        "/add NAME\n"
+        "/done NAME\n"
         "/habits\n"
         "/today\n"
         "/stats\n"
-        "/delete <name>\n\n"
+        "/delete NAME\n\n"
         "Names are case-sensitive as you typed them.\n"
         "Check-ins use UTC day boundary."
     )
@@ -59,7 +59,7 @@ async def cmd_add(message: Message, command: CommandObject, db: Database) -> Non
     await db.upsert_user(message.from_user.id, message.from_user.username)
     name = _habit_name_from_args(command)
     if not name:
-        await message.answer("Usage: /add <habit name>\nExample: /add read 20m")
+        await message.answer("Usage: /add HABIT_NAME\nExample: /add read 20m")
         return
     try:
         habit = await db.add_habit(message.from_user.id, name)
@@ -78,7 +78,7 @@ async def cmd_done(message: Message, command: CommandObject, db: Database) -> No
     assert message.from_user
     name = _habit_name_from_args(command)
     if not name:
-        await message.answer("Usage: /done <habit name>\nExample: /done gym")
+        await message.answer("Usage: /done HABIT_NAME\nExample: /done gym")
         return
     try:
         result = await db.checkin(message.from_user.id, name)
@@ -151,7 +151,7 @@ async def cmd_delete(message: Message, command: CommandObject, db: Database) -> 
     assert message.from_user
     name = _habit_name_from_args(command)
     if not name:
-        await message.answer("Usage: /delete <habit name>")
+        await message.answer("Usage: /delete HABIT_NAME")
         return
     ok = await db.archive_habit(message.from_user.id, name)
     if ok:

@@ -7,8 +7,6 @@ import sys
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
-from aiogram.client.default import DefaultBotProperties
-from aiogram.enums import ParseMode
 from dotenv import load_dotenv
 
 # Allow `python -m bot.main` from project root
@@ -38,18 +36,15 @@ async def main() -> None:
     await db.connect()
 
 
-    bot = Bot(
-        token=token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    )
+    bot = Bot(token=token)
     dp = Dispatcher()
     dp["db"] = db
     dp.include_router(router)
 
-    # Simple DI: pass db into handlers via workflow_data
     try:
         logging.info("Habit tracker bot started")
-        await dp.start_polling(bot, db=db)
+        # drop_pending_updates avoids replaying old backlog after redeploys
+        await dp.start_polling(bot, db=db, drop_pending_updates=True)
     finally:
         await db.close()
         await bot.session.close()
