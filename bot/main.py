@@ -14,9 +14,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from bot.db import Database
-from bot.handlers import router
-from bot.reminders import reminder_loop
+# noqa: E402 below -- these imports must come after the sys.path patch above,
+# so that `python bot/main.py` (not just `python -m bot.main`) also works.
+from bot.db import Database  # noqa: E402
+from bot.handlers import router  # noqa: E402
+from bot.reminders import reminder_loop  # noqa: E402
 
 
 async def main() -> None:
@@ -44,7 +46,7 @@ async def main() -> None:
     remind_task = asyncio.create_task(reminder_loop(bot, db, interval_sec=30.0))
     try:
         logging.info("Habit tracker bot started")
-        await dp.start_polling(bot, db=db, drop_pending_updates=True)
+        await dp.start_polling(bot, drop_pending_updates=True)
     finally:
         remind_task.cancel()
         try:

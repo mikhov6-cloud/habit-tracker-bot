@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import csv
+import io
 import re
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject, CommandStart, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from bot.db import (
     ALL_DAYS_MASK,
@@ -14,7 +16,6 @@ from bot.db import (
     format_days,
     format_habit_line,
     local_hhmm,
-    local_today,
     normalize_days_mask,
 )
 from bot.keyboards import (
@@ -122,12 +123,14 @@ async def cmd_help(message: Message, state: FSMContext) -> None:
         "➕ имя → дни → время → заметка\n"
         "📅 дни: каждый / будни / вых / свои\n"
         "✔️ отметить · ✏️ править · 🔔 вкл/выкл\n"
-        "⏸ пауза в правке · стрик только по своим дням",
+        "⏸ пауза в правке · стрик только по своим дням\n"
+        "/export — CSV со всеми отметками · /cancel — выйти из любого шага",
         reply_markup=main_menu(),
     )
 
 
 @router.message(F.text == BTN_CANCEL)
+@router.message(Command("cancel"))
 async def btn_cancel(message: Message, state: FSMContext) -> None:
     await _cancel(message, state)
 
@@ -878,7 +881,42 @@ async def cmd_stats(message: Message, state: FSMContext, db: Database) -> None:
     lines = []
     for r in rows:
         pause = " ⏸" if r.get("paused") else ""
+        record = f" · рекорд {r['best']}" if r["best"] > r["streak"] else ""
         lines.append(
-            f"• {r['name']}{pause}: стрик {r['streak']} · нед {r['week']} · всего {r['total']}"
+            f"• {r['name']}{pause}: стрик {r['streak']}{record} · нед {r['week']} · всего {r['total']}"
         )
     await message.answer("\n".join(lines), reply_markup=main_menu())
+
+
+# ----- export -----
+
+
+@router.message(Command("export"))
+async def cmd_export(message: Message, state: FSMContext, db: Database) -> None:
+    """Dump every check-in as a CSV file — for backup or for poking at the
+    numbers yourself outside Telegram (e.g. a spreadsheet or a small script)."""
+    assert message.from_user
+    await state.clear()
+    rows = await db.export_rows(message.from_user.id)
+    if not rows:
+        await message.answer("Пока нечего экспортировать.", reply_markup=main_menu())
+        return
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["habit", "day", "created_at_utc"])
+    for r in rows:
+        writer.writerow([r["habit"], r["day"], r["created_at"]])
+    # utf-8-sig so Excel opens Cyrillic habit names without mangling them
+    data = buf.getvalue().encode("utf-8-sig")
+    file = BufferedInputFile(data, filename="habits_export.csv")
+    await message.answer_document(file, caption=f"{len(rows)} отметок")
+
+
+# ----- fallback (must stay last: only catches what nothing else matched) -----
+
+
+@router.message(F.text)
+async def fallback_text(message: Message, state: FSMContext) -> None:
+    if await state.get_state() is not None:
+        return  # mid-wizard free text is handled by that state's own handler
+    await message.answer("Не понял. /help или кнопка в меню.", reply_markup=main_menu())

@@ -124,6 +124,45 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(is_due_weekday("024", 1))
         self.assertTrue(is_due_weekday(None, 3))
 
+    async def test_best_streak_survives_a_broken_run(self) -> None:
+        # daily habit: an older 4-day streak, a gap, then a shorter, more
+        # recent 2-day streak ending today. best_streak scans from
+        # created_at, so backdate creation too -- otherwise there's no
+        # "history" before today to find the older run in.
+        habit = await self.db.add_habit(1, "read2")
+        assert habit is not None
+        day = datetime.fromisoformat(local_today(DEFAULT_TZ)).date()
+        old_created = f"{(day - timedelta(days=12)).isoformat()}T00:00:00+00:00"
+        await self.db._db.execute(
+            "UPDATE habits SET created_at = ? WHERE id = ?", (old_created, habit["id"])
+        )
+        await self.db._db.commit()
+        for offset in (9, 8, 7, 6, 1, 0):  # gap at offsets 5..2
+            d = (day - timedelta(days=offset)).isoformat()
+            await self.db.checkin_by_id(1, habit["id"], d)
+        # pass the id, not the stale dict, so created_at is re-read from the db
+        best = await self.db.best_streak(habit["id"], day.isoformat())
+        current = await self.db.current_streak(habit["id"], day.isoformat())
+        self.assertEqual(best, 4)
+        self.assertEqual(current, 2)
+
+    async def test_reactivate_preserves_days_mask(self) -> None:
+        # regression test: re-adding a deleted habit by name via the /add
+        # shortcut (no days_mask passed) used to silently reset it to daily
+        habit = await self.db.add_habit(1, "зал2", days_mask="024")
+        assert habit is not None
+        self.assertTrue(await self.db.archive_habit(1, "зал2"))
+        revived = await self.db.add_habit(1, "зал2")  # no days_mask this time
+        assert revived is not None
+        self.assertEqual(revived["days_mask"], "024")
+
+    async def test_export_rows(self) -> None:
+        habit = await self.db.add_habit(1, "export_me")
+        assert habit is not None
+        await self.db.checkin_by_id(1, habit["id"], local_today(DEFAULT_TZ))
+        rows = await self.db.export_rows(1)
+        self.assertTrue(any(r["habit"] == "export_me" for r in rows))
+
 
 if __name__ == "__main__":
     unittest.main()

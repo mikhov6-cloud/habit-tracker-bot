@@ -1,3 +1,11 @@
+"""SQLite storage layer.
+
+Three tables: users (timezone per user), habits (schedule + days_mask),
+checkins (one row per habit per completed day). Habits are soft-deleted
+(is_active=0) instead of removed, so re-adding the same name can restore
+the old schedule instead of starting from scratch — see add_habit().
+"""
+
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
@@ -265,6 +273,12 @@ class Database:
             )
             await self._db.commit()
         except aiosqlite.IntegrityError:
+            # UNIQUE(user_id, name) means the name is already taken. If the
+            # existing row is a soft-deleted (is_active=0) habit, treat this
+            # as "undelete" rather than a hard error. schedule_time/note/days_mask
+            # are only overwritten if the caller explicitly passed a value for
+            # them (COALESCE / CASE below) -- e.g. `/add Зал` with no other args
+            # should restore the old schedule instead of quietly resetting it.
             cur = await self._db.execute(
                 """
                 UPDATE habits
@@ -272,13 +286,14 @@ class Database:
                     paused = 0,
                     schedule_time = COALESCE(?, schedule_time),
                     note = COALESCE(?, note),
-                    days_mask = ?,
+                    days_mask = CASE WHEN ? IS NOT NULL THEN ? ELSE days_mask END,
                     remind = CASE WHEN ? IS NOT NULL THEN ? ELSE remind END
                 WHERE user_id = ? AND name = ? AND is_active = 0
                 """,
                 (
                     schedule_time,
                     note,
+                    days_mask,
                     days,
                     schedule_time,
                     remind_flag,
@@ -521,6 +536,65 @@ class Database:
             cursor_day = prev_due(cursor_day)
         return streak
 
+    async def best_streak(
+        self, habit: dict[str, Any] | int, anchor_day: str | None = None
+    ) -> int:
+        """Longest run of consecutive scheduled days ever completed for this
+        habit, not just the active one. Walks every scheduled day from habit
+        creation to anchor_day once — cheap for personal use (weeks/months of
+        history), and doesn't need a stored counter that could drift out of
+        sync with checkins.
+        """
+        if isinstance(habit, int):
+            cur = await self._db.execute(self._habit_select() + " WHERE id = ?", (habit,))
+            row = await cur.fetchone()
+            if not row:
+                return 0
+            habit = dict(row)
+
+        habit_id = habit["id"]
+        mask = normalize_days_mask(habit.get("days_mask"))
+        cur = await self._db.execute(
+            "SELECT day FROM checkins WHERE habit_id = ?",
+            (habit_id,),
+        )
+        days = {date.fromisoformat(r["day"]) for r in await cur.fetchall()}
+        if not days:
+            return 0
+
+        start = date.fromisoformat(str(habit["created_at"])[:10])
+        end = date.fromisoformat(anchor_day) if anchor_day else datetime.now(timezone.utc).date()
+        if start > end:
+            return 0
+
+        best = 0
+        run = 0
+        d = start
+        while d <= end:
+            if str(d.weekday()) in mask:
+                if d in days:
+                    run += 1
+                    best = max(best, run)
+                else:
+                    run = 0
+            d += timedelta(days=1)
+        return best
+
+    async def export_rows(self, user_id: int) -> list[dict[str, Any]]:
+        """Every check-in for a user with its habit name, oldest first — flat
+        rows ready to write out as CSV for the /export command."""
+        cur = await self._db.execute(
+            """
+            SELECT h.name AS habit, c.day AS day, c.created_at AS created_at
+            FROM checkins c
+            JOIN habits h ON h.id = c.habit_id
+            WHERE h.user_id = ?
+            ORDER BY c.day ASC, h.name ASC
+            """,
+            (user_id,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
     async def stats(self, user_id: int) -> list[dict[str, Any]]:
         habits = await self.list_habits(user_id, active_only=True)
         day = local_today(await self.get_timezone(user_id))
@@ -530,6 +604,7 @@ class Database:
                 {
                     **habit,
                     "streak": await self.current_streak(habit, day),
+                    "best": await self.best_streak(habit, day),
                     "total": await self.total_checkins(habit["id"]),
                     "week": await self.week_count(habit["id"], day),
                 }

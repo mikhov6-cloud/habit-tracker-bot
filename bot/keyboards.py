@@ -7,7 +7,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup,
 )
 
-from bot.db import ALL_DAYS_MASK, DAY_LABELS, format_days, normalize_days_mask
+from bot.db import DAY_LABELS, format_days, normalize_days_mask
 
 BTN_TODAY = "✅ Сегодня"
 BTN_STATS = "📊 Стата"
