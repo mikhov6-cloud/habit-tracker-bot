@@ -33,8 +33,10 @@ async def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    db = Database()
+    db_path = os.getenv("DATABASE_PATH", "").strip()
+    db = Database(db_path) if db_path else Database()
     await db.connect()
+
 
     bot = Bot(
         token=token,
