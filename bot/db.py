@@ -3,14 +3,32 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import aiosqlite
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent.parent / "data" / "habits.db"
+DEFAULT_TZ = "Europe/Moscow"
 
 
 def _utc_today() -> str:
     return datetime.now(timezone.utc).date().isoformat()
+
+
+def local_today(tz_name: str = DEFAULT_TZ) -> str:
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo(DEFAULT_TZ)
+    return datetime.now(tz).date().isoformat()
+
+
+def local_hhmm(tz_name: str = DEFAULT_TZ) -> str:
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo(DEFAULT_TZ)
+    return datetime.now(tz).strftime("%H:%M")
 
 
 class Database:
@@ -29,10 +47,11 @@ class Database:
 
     async def _init_schema(self) -> None:
         await self._db.executescript(
-            """
+            f"""
             CREATE TABLE IF NOT EXISTS users (
                 user_id INTEGER PRIMARY KEY,
                 username TEXT,
+                timezone TEXT NOT NULL DEFAULT '{DEFAULT_TZ}',
                 created_at TEXT NOT NULL
             );
 
@@ -42,6 +61,7 @@ class Database:
                 name TEXT NOT NULL,
                 schedule_time TEXT,
                 note TEXT,
+                remind INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(user_id, name),
@@ -56,13 +76,25 @@ class Database:
                 UNIQUE(habit_id, day),
                 FOREIGN KEY (habit_id) REFERENCES habits(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS reminder_log (
+                habit_id INTEGER NOT NULL,
+                day TEXT NOT NULL,
+                sent_at TEXT NOT NULL,
+                PRIMARY KEY (habit_id, day),
+                FOREIGN KEY (habit_id) REFERENCES habits(id) ON DELETE CASCADE
+            );
             """
         )
-        # Soft migrate older DBs created before schedule_time/note existed.
-        for col_def in ("schedule_time TEXT", "note TEXT"):
+        for table, col_def in (
+            ("users", "timezone TEXT"),
+            ("habits", "schedule_time TEXT"),
+            ("habits", "note TEXT"),
+            ("habits", "remind INTEGER NOT NULL DEFAULT 0"),
+        ):
             col = col_def.split()[0]
             try:
-                await self._db.execute(f"ALTER TABLE habits ADD COLUMN {col_def}")
+                await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col_def}")
             except aiosqlite.OperationalError:
                 pass
         await self._db.commit()
@@ -71,13 +103,37 @@ class Database:
         now = datetime.now(timezone.utc).isoformat()
         await self._db.execute(
             """
-            INSERT INTO users (user_id, username, created_at)
-            VALUES (?, ?, ?)
+            INSERT INTO users (user_id, username, timezone, created_at)
+            VALUES (?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET username = excluded.username
             """,
-            (user_id, username, now),
+            (user_id, username, DEFAULT_TZ, now),
         )
         await self._db.commit()
+
+    async def get_user(self, user_id: int) -> dict[str, Any] | None:
+        cursor = await self._db.execute(
+            "SELECT user_id, username, timezone, created_at FROM users WHERE user_id = ?",
+            (user_id,),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+    async def get_timezone(self, user_id: int) -> str:
+        user = await self.get_user(user_id)
+        if not user:
+            return DEFAULT_TZ
+        return user.get("timezone") or DEFAULT_TZ
+
+    async def set_timezone(self, user_id: int, tz_name: str) -> str:
+        # validate
+        ZoneInfo(tz_name)
+        await self._db.execute(
+            "UPDATE users SET timezone = ? WHERE user_id = ?",
+            (tz_name, user_id),
+        )
+        await self._db.commit()
+        return tz_name
 
     async def add_habit(
         self,
@@ -85,6 +141,7 @@ class Database:
         name: str,
         schedule_time: str | None = None,
         note: str | None = None,
+        remind: bool | None = None,
     ) -> dict[str, Any] | None:
         name = " ".join(name.split()).strip()
         if not name:
@@ -97,14 +154,19 @@ class Database:
         if note and len(note) > 200:
             raise ValueError("Заметка слишком длинная (макс. 200)")
 
+        if remind is None:
+            remind_flag = 1 if schedule_time else 0
+        else:
+            remind_flag = 1 if remind and schedule_time else 0
+
         now = datetime.now(timezone.utc).isoformat()
         try:
             await self._db.execute(
                 """
-                INSERT INTO habits (user_id, name, schedule_time, note, created_at, is_active)
-                VALUES (?, ?, ?, ?, ?, 1)
+                INSERT INTO habits (user_id, name, schedule_time, note, remind, created_at, is_active)
+                VALUES (?, ?, ?, ?, ?, ?, 1)
                 """,
-                (user_id, name, schedule_time, note, now),
+                (user_id, name, schedule_time, note, remind_flag, now),
             )
             await self._db.commit()
         except aiosqlite.IntegrityError:
@@ -113,10 +175,21 @@ class Database:
                 UPDATE habits
                 SET is_active = 1,
                     schedule_time = COALESCE(?, schedule_time),
-                    note = COALESCE(?, note)
+                    note = COALESCE(?, note),
+                    remind = CASE
+                        WHEN ? IS NOT NULL THEN ?
+                        ELSE remind
+                    END
                 WHERE user_id = ? AND name = ? AND is_active = 0
                 """,
-                (schedule_time, note, user_id, name),
+                (
+                    schedule_time,
+                    note,
+                    schedule_time,
+                    remind_flag,
+                    user_id,
+                    name,
+                ),
             )
             await self._db.commit()
             if cursor.rowcount == 0:
@@ -127,7 +200,7 @@ class Database:
     async def get_habit_by_name(self, user_id: int, name: str) -> dict[str, Any] | None:
         cursor = await self._db.execute(
             """
-            SELECT id, user_id, name, schedule_time, note, created_at, is_active
+            SELECT id, user_id, name, schedule_time, note, remind, created_at, is_active
             FROM habits
             WHERE user_id = ? AND name = ?
             """,
@@ -139,7 +212,7 @@ class Database:
     async def get_habit_by_id(self, user_id: int, habit_id: int) -> dict[str, Any] | None:
         cursor = await self._db.execute(
             """
-            SELECT id, user_id, name, schedule_time, note, created_at, is_active
+            SELECT id, user_id, name, schedule_time, note, remind, created_at, is_active
             FROM habits
             WHERE user_id = ? AND id = ?
             """,
@@ -150,7 +223,7 @@ class Database:
 
     async def list_habits(self, user_id: int, active_only: bool = True) -> list[dict[str, Any]]:
         sql = """
-            SELECT id, user_id, name, schedule_time, note, created_at, is_active
+            SELECT id, user_id, name, schedule_time, note, remind, created_at, is_active
             FROM habits
             WHERE user_id = ?
         """
@@ -160,6 +233,19 @@ class Database:
         cursor = await self._db.execute(sql, (user_id,))
         rows = await cursor.fetchall()
         return [dict(r) for r in rows]
+
+    async def set_habit_remind(self, user_id: int, habit_id: int, enabled: bool) -> dict[str, Any] | None:
+        habit = await self.get_habit_by_id(user_id, habit_id)
+        if not habit or not habit["is_active"]:
+            return None
+        if enabled and not habit.get("schedule_time"):
+            raise ValueError("Сначала нужно время у привычки")
+        await self._db.execute(
+            "UPDATE habits SET remind = ? WHERE id = ? AND user_id = ?",
+            (1 if enabled else 0, habit_id, user_id),
+        )
+        await self._db.commit()
+        return await self.get_habit_by_id(user_id, habit_id)
 
     async def archive_habit(self, user_id: int, name: str) -> bool:
         cursor = await self._db.execute(
@@ -188,6 +274,8 @@ class Database:
         habit = await self.get_habit_by_name(user_id, name)
         if not habit or not habit["is_active"]:
             raise KeyError("Habit not found")
+        if day is None:
+            day = local_today(await self.get_timezone(user_id))
         return await self._checkin_habit(habit, day)
 
     async def checkin_by_id(
@@ -196,12 +284,12 @@ class Database:
         habit = await self.get_habit_by_id(user_id, habit_id)
         if not habit or not habit["is_active"]:
             raise KeyError("Habit not found")
+        if day is None:
+            day = local_today(await self.get_timezone(user_id))
         return await self._checkin_habit(habit, day)
 
-    async def _checkin_habit(self, habit: dict[str, Any], day: str | None = None) -> dict[str, Any]:
-        day = day or _utc_today()
+    async def _checkin_habit(self, habit: dict[str, Any], day: str) -> dict[str, Any]:
         date.fromisoformat(day)
-
         now = datetime.now(timezone.utc).isoformat()
         try:
             await self._db.execute(
@@ -216,7 +304,7 @@ class Database:
         except aiosqlite.IntegrityError:
             created = False
 
-        streak = await self.current_streak(habit["id"])
+        streak = await self.current_streak(habit["id"], day)
         total = await self.total_checkins(habit["id"])
         return {
             "habit": habit,
@@ -234,7 +322,7 @@ class Database:
         row = await cursor.fetchone()
         return int(row["c"])
 
-    async def current_streak(self, habit_id: int) -> int:
+    async def current_streak(self, habit_id: int, anchor_day: str | None = None) -> int:
         cursor = await self._db.execute(
             """
             SELECT day FROM checkins
@@ -248,7 +336,11 @@ class Database:
             return 0
 
         days = {date.fromisoformat(r["day"]) for r in rows}
-        today = datetime.now(timezone.utc).date()
+        if anchor_day:
+            today = date.fromisoformat(anchor_day)
+        else:
+            today = datetime.now(timezone.utc).date()
+
         if today in days:
             cursor_day = today
         elif today.fromordinal(today.toordinal() - 1) in days:
@@ -264,6 +356,7 @@ class Database:
 
     async def stats(self, user_id: int) -> list[dict[str, Any]]:
         habits = await self.list_habits(user_id, active_only=True)
+        day = local_today(await self.get_timezone(user_id))
         result: list[dict[str, Any]] = []
         for habit in habits:
             result.append(
@@ -272,14 +365,15 @@ class Database:
                     "name": habit["name"],
                     "schedule_time": habit.get("schedule_time"),
                     "note": habit.get("note"),
-                    "streak": await self.current_streak(habit["id"]),
+                    "remind": habit.get("remind"),
+                    "streak": await self.current_streak(habit["id"], day),
                     "total": await self.total_checkins(habit["id"]),
                 }
             )
         return result
 
     async def today_status(self, user_id: int) -> list[dict[str, Any]]:
-        today = _utc_today()
+        day = local_today(await self.get_timezone(user_id))
         habits = await self.list_habits(user_id, active_only=True)
         result: list[dict[str, Any]] = []
         for habit in habits:
@@ -288,7 +382,7 @@ class Database:
                 SELECT 1 FROM checkins
                 WHERE habit_id = ? AND day = ?
                 """,
-                (habit["id"], today),
+                (habit["id"], day),
             )
             done = await cursor.fetchone() is not None
             result.append(
@@ -297,17 +391,83 @@ class Database:
                     "name": habit["name"],
                     "schedule_time": habit.get("schedule_time"),
                     "note": habit.get("note"),
+                    "remind": habit.get("remind"),
                     "done": done,
-                    "streak": await self.current_streak(habit["id"]),
+                    "streak": await self.current_streak(habit["id"], day),
                 }
             )
         return result
+
+    async def list_due_reminders(self) -> list[dict[str, Any]]:
+        """Habits that should get a reminder right now (local HH:MM match)."""
+        cursor = await self._db.execute(
+            """
+            SELECT
+                h.id AS habit_id,
+                h.user_id AS user_id,
+                h.name AS name,
+                h.schedule_time AS schedule_time,
+                h.note AS note,
+                COALESCE(u.timezone, ?) AS timezone
+            FROM habits h
+            JOIN users u ON u.user_id = h.user_id
+            WHERE h.is_active = 1
+              AND h.remind = 1
+              AND h.schedule_time IS NOT NULL
+              AND h.schedule_time != ''
+            """,
+            (DEFAULT_TZ,),
+        )
+        rows = await cursor.fetchall()
+        due: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            tz_name = item["timezone"] or DEFAULT_TZ
+            try:
+                now_hm = local_hhmm(tz_name)
+                day = local_today(tz_name)
+            except Exception:
+                continue
+            if item["schedule_time"] != now_hm:
+                continue
+
+            # already checked in today?
+            c1 = await self._db.execute(
+                "SELECT 1 FROM checkins WHERE habit_id = ? AND day = ?",
+                (item["habit_id"], day),
+            )
+            if await c1.fetchone():
+                continue
+
+            # already reminded today?
+            c2 = await self._db.execute(
+                "SELECT 1 FROM reminder_log WHERE habit_id = ? AND day = ?",
+                (item["habit_id"], day),
+            )
+            if await c2.fetchone():
+                continue
+
+            item["day"] = day
+            due.append(item)
+        return due
+
+    async def mark_reminder_sent(self, habit_id: int, day: str) -> None:
+        now = datetime.now(timezone.utc).isoformat()
+        await self._db.execute(
+            """
+            INSERT OR IGNORE INTO reminder_log (habit_id, day, sent_at)
+            VALUES (?, ?, ?)
+            """,
+            (habit_id, day, now),
+        )
+        await self._db.commit()
 
 
 def format_habit_line(habit: dict[str, Any]) -> str:
     parts = [habit["name"]]
     if habit.get("schedule_time"):
-        parts.append(f"⏰ {habit['schedule_time']}")
+        bell = "🔔" if habit.get("remind") else "⏰"
+        parts.append(f"{bell} {habit['schedule_time']}")
     if habit.get("note"):
         parts.append(f"({habit['note']})")
     return " · ".join(parts)

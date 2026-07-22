@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from bot.db import Database
 from bot.handlers import router
+from bot.reminders import reminder_loop
 
 
 async def main() -> None:
@@ -40,10 +41,16 @@ async def main() -> None:
     dp["db"] = db
     dp.include_router(router)
 
+    remind_task = asyncio.create_task(reminder_loop(bot, db, interval_sec=30.0))
     try:
         logging.info("Habit tracker bot started")
         await dp.start_polling(bot, db=db, drop_pending_updates=True)
     finally:
+        remind_task.cancel()
+        try:
+            await remind_task
+        except asyncio.CancelledError:
+            pass
         await db.close()
         await bot.session.close()
 
