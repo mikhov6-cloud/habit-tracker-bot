@@ -40,6 +40,8 @@ class Database:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
+                schedule_time TEXT,
+                note TEXT,
                 created_at TEXT NOT NULL,
                 is_active INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(user_id, name),
@@ -56,6 +58,13 @@ class Database:
             );
             """
         )
+        # Soft migrate older DBs created before schedule_time/note existed.
+        for col_def in ("schedule_time TEXT", "note TEXT"):
+            col = col_def.split()[0]
+            try:
+                await self._db.execute(f"ALTER TABLE habits ADD COLUMN {col_def}")
+            except aiosqlite.OperationalError:
+                pass
         await self._db.commit()
 
     async def upsert_user(self, user_id: int, username: str | None) -> None:
@@ -70,32 +79,44 @@ class Database:
         )
         await self._db.commit()
 
-    async def add_habit(self, user_id: int, name: str) -> dict[str, Any] | None:
+    async def add_habit(
+        self,
+        user_id: int,
+        name: str,
+        schedule_time: str | None = None,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
         name = " ".join(name.split()).strip()
         if not name:
-            raise ValueError("Habit name is empty")
+            raise ValueError("Название привычки пустое")
         if len(name) > 64:
-            raise ValueError("Habit name is too long (max 64)")
+            raise ValueError("Название слишком длинное (макс. 64)")
+
+        schedule_time = (schedule_time or "").strip() or None
+        note = (note or "").strip() or None
+        if note and len(note) > 200:
+            raise ValueError("Заметка слишком длинная (макс. 200)")
 
         now = datetime.now(timezone.utc).isoformat()
         try:
-            cursor = await self._db.execute(
+            await self._db.execute(
                 """
-                INSERT INTO habits (user_id, name, created_at, is_active)
-                VALUES (?, ?, ?, 1)
+                INSERT INTO habits (user_id, name, schedule_time, note, created_at, is_active)
+                VALUES (?, ?, ?, ?, ?, 1)
                 """,
-                (user_id, name, now),
+                (user_id, name, schedule_time, note, now),
             )
             await self._db.commit()
         except aiosqlite.IntegrityError:
-            # Reactivate if it existed and was archived
             cursor = await self._db.execute(
                 """
                 UPDATE habits
-                SET is_active = 1
+                SET is_active = 1,
+                    schedule_time = COALESCE(?, schedule_time),
+                    note = COALESCE(?, note)
                 WHERE user_id = ? AND name = ? AND is_active = 0
                 """,
-                (user_id, name),
+                (schedule_time, note, user_id, name),
             )
             await self._db.commit()
             if cursor.rowcount == 0:
@@ -106,7 +127,7 @@ class Database:
     async def get_habit_by_name(self, user_id: int, name: str) -> dict[str, Any] | None:
         cursor = await self._db.execute(
             """
-            SELECT id, user_id, name, created_at, is_active
+            SELECT id, user_id, name, schedule_time, note, created_at, is_active
             FROM habits
             WHERE user_id = ? AND name = ?
             """,
@@ -115,9 +136,21 @@ class Database:
         row = await cursor.fetchone()
         return dict(row) if row else None
 
+    async def get_habit_by_id(self, user_id: int, habit_id: int) -> dict[str, Any] | None:
+        cursor = await self._db.execute(
+            """
+            SELECT id, user_id, name, schedule_time, note, created_at, is_active
+            FROM habits
+            WHERE user_id = ? AND id = ?
+            """,
+            (user_id, habit_id),
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
     async def list_habits(self, user_id: int, active_only: bool = True) -> list[dict[str, Any]]:
         sql = """
-            SELECT id, user_id, name, created_at, is_active
+            SELECT id, user_id, name, schedule_time, note, created_at, is_active
             FROM habits
             WHERE user_id = ?
         """
@@ -140,13 +173,33 @@ class Database:
         await self._db.commit()
         return cursor.rowcount > 0
 
+    async def archive_habit_by_id(self, user_id: int, habit_id: int) -> dict[str, Any] | None:
+        habit = await self.get_habit_by_id(user_id, habit_id)
+        if not habit or not habit["is_active"]:
+            return None
+        await self._db.execute(
+            "UPDATE habits SET is_active = 0 WHERE id = ? AND user_id = ?",
+            (habit_id, user_id),
+        )
+        await self._db.commit()
+        return habit
+
     async def checkin(self, user_id: int, name: str, day: str | None = None) -> dict[str, Any]:
         habit = await self.get_habit_by_name(user_id, name)
         if not habit or not habit["is_active"]:
             raise KeyError("Habit not found")
+        return await self._checkin_habit(habit, day)
 
+    async def checkin_by_id(
+        self, user_id: int, habit_id: int, day: str | None = None
+    ) -> dict[str, Any]:
+        habit = await self.get_habit_by_id(user_id, habit_id)
+        if not habit or not habit["is_active"]:
+            raise KeyError("Habit not found")
+        return await self._checkin_habit(habit, day)
+
+    async def _checkin_habit(self, habit: dict[str, Any], day: str | None = None) -> dict[str, Any]:
         day = day or _utc_today()
-        # validate date
         date.fromisoformat(day)
 
         now = datetime.now(timezone.utc).isoformat()
@@ -196,7 +249,6 @@ class Database:
 
         days = {date.fromisoformat(r["day"]) for r in rows}
         today = datetime.now(timezone.utc).date()
-        # Streak can start from today or yesterday (if not checked today yet)
         if today in days:
             cursor_day = today
         elif today.fromordinal(today.toordinal() - 1) in days:
@@ -216,7 +268,10 @@ class Database:
         for habit in habits:
             result.append(
                 {
+                    "id": habit["id"],
                     "name": habit["name"],
+                    "schedule_time": habit.get("schedule_time"),
+                    "note": habit.get("note"),
                     "streak": await self.current_streak(habit["id"]),
                     "total": await self.total_checkins(habit["id"]),
                 }
@@ -238,9 +293,21 @@ class Database:
             done = await cursor.fetchone() is not None
             result.append(
                 {
+                    "id": habit["id"],
                     "name": habit["name"],
+                    "schedule_time": habit.get("schedule_time"),
+                    "note": habit.get("note"),
                     "done": done,
                     "streak": await self.current_streak(habit["id"]),
                 }
             )
         return result
+
+
+def format_habit_line(habit: dict[str, Any]) -> str:
+    parts = [habit["name"]]
+    if habit.get("schedule_time"):
+        parts.append(f"⏰ {habit['schedule_time']}")
+    if habit.get("note"):
+        parts.append(f"({habit['note']})")
+    return " · ".join(parts)

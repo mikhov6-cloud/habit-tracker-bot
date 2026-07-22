@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from bot.db import Database
+from bot.db import Database, format_habit_line
 
 
 class DatabaseTests(unittest.IsolatedAsyncioTestCase):
@@ -18,10 +18,13 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         self.tmp.cleanup()
 
     async def test_add_and_list_habit(self) -> None:
-        habit = await self.db.add_habit(1, "gym")
+        habit = await self.db.add_habit(1, "gym", schedule_time="18:00", note="ноги")
         assert habit is not None
+        self.assertEqual(habit["schedule_time"], "18:00")
+        self.assertEqual(habit["note"], "ноги")
         habits = await self.db.list_habits(1)
         self.assertEqual([h["name"] for h in habits], ["gym"])
+        self.assertIn("18:00", format_habit_line(habit))
 
     async def test_duplicate_habit(self) -> None:
         await self.db.add_habit(1, "gym")
@@ -43,10 +46,25 @@ class DatabaseTests(unittest.IsolatedAsyncioTestCase):
         r3 = await self.db.checkin(1, "read", today.isoformat())
         self.assertFalse(r3["created"])
 
+    async def test_checkin_by_id(self) -> None:
+        habit = await self.db.add_habit(1, "water")
+        assert habit is not None
+        result = await self.db.checkin_by_id(1, habit["id"])
+        self.assertTrue(result["created"])
+        self.assertEqual(result["total"], 1)
+
     async def test_archive_habit(self) -> None:
         await self.db.add_habit(1, "water")
         ok = await self.db.archive_habit(1, "water")
         self.assertTrue(ok)
+        self.assertEqual(await self.db.list_habits(1), [])
+
+    async def test_archive_by_id(self) -> None:
+        habit = await self.db.add_habit(1, "sleep")
+        assert habit is not None
+        archived = await self.db.archive_habit_by_id(1, habit["id"])
+        assert archived is not None
+        self.assertEqual(archived["name"], "sleep")
         self.assertEqual(await self.db.list_habits(1), [])
 
 

@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher
+from aiogram.fsm.storage.memory import MemoryStorage
 from dotenv import load_dotenv
 
-# Allow `python -m bot.main` from project root
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -35,15 +35,13 @@ async def main() -> None:
     db = Database(db_path) if db_path else Database()
     await db.connect()
 
-
     bot = Bot(token=token)
-    dp = Dispatcher()
+    dp = Dispatcher(storage=MemoryStorage())
     dp["db"] = db
     dp.include_router(router)
 
     try:
         logging.info("Habit tracker bot started")
-        # drop_pending_updates avoids replaying old backlog after redeploys
         await dp.start_polling(bot, db=db, drop_pending_updates=True)
     finally:
         await db.close()
