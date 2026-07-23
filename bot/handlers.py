@@ -20,12 +20,15 @@ from bot.db import (
 )
 from bot.keyboards import (
     BTN_ADD,
+    BTN_BACK,
     BTN_CANCEL,
     BTN_DELETE,
     BTN_DONE,
     BTN_EDIT,
+    BTN_EXPORT,
     BTN_HABITS,
     BTN_HELP,
+    BTN_MANAGE,
     BTN_REMINDERS,
     BTN_SKIP,
     BTN_STATS,
@@ -35,6 +38,7 @@ from bot.keyboards import (
     days_step_kb,
     edit_habit_kb,
     habits_inline,
+    habits_menu,
     main_menu,
     note_step_kb,
     reminders_panel_kb,
@@ -110,7 +114,10 @@ async def cmd_start(message: Message, state: FSMContext, db: Database) -> None:
     await db.upsert_user(message.from_user.id, message.from_user.username)
     await message.answer(
         "Трекер привычек.\n"
-        "➕ добавить · ✔️ отметить · ✏️ править · 🔔 напомин.",
+        "✅ Сегодня — что нужно сделать сегодня\n"
+        "✔️ Отметить — отметить привычку выполненной\n"
+        "📋 Привычки — добавить / посмотреть / изменить / статистика\n"
+        "🔔 Напоминания — время и часовой пояс",
         reply_markup=main_menu(),
     )
 
@@ -120,11 +127,13 @@ async def cmd_start(message: Message, state: FSMContext, db: Database) -> None:
 async def cmd_help(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(
-        "➕ имя → дни → время → заметка\n"
+        "📋 Привычки → ➕ имя → дни → время → заметка\n"
         "📅 дни: каждый / будни / вых / свои\n"
-        "✔️ отметить · ✏️ править · 🔔 вкл/выкл\n"
-        "⏸ пауза в правке · стрик только по своим дням\n"
-        "/export — CSV со всеми отметками · /cancel — выйти из любого шага",
+        "✔️ Отметить · ↩ отменить отметку\n"
+        "✏️ Править: дни, время, заметка, имя, 🔔, ⏸ пауза\n"
+        "📊 Статистика показывает стрик и рекорд · 📤 Экспорт — CSV со всеми отметками\n"
+        "❌ Отмена выходит из любого шага, даже если не видно клавиатуру\n"
+        "Стрик считается только по своим дням для привычки",
         reply_markup=main_menu(),
     )
 
@@ -135,6 +144,21 @@ async def btn_cancel(message: Message, state: FSMContext) -> None:
     await _cancel(message, state)
 
 
+@router.message(F.text == BTN_MANAGE)
+async def btn_manage(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(
+        "Привычки — добавить, посмотреть, изменить, статистика, экспорт:",
+        reply_markup=habits_menu(),
+    )
+
+
+@router.message(F.text == BTN_BACK)
+async def btn_back(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Меню.", reply_markup=main_menu())
+
+
 # ----- add wizard -----
 
 
@@ -143,7 +167,7 @@ async def btn_add(message: Message, state: FSMContext, db: Database) -> None:
     assert message.from_user
     await db.upsert_user(message.from_user.id, message.from_user.username)
     await state.set_state(AddHabit.name)
-    await message.answer("Название:", reply_markup=cancel_kb())
+    await message.answer("Название привычки:", reply_markup=cancel_kb())
 
 
 @router.message(Command("add"))
@@ -153,19 +177,19 @@ async def cmd_add(message: Message, command: CommandObject, state: FSMContext, d
     name = (command.args or "").strip()
     if not name:
         await state.set_state(AddHabit.name)
-        await message.answer("Название:", reply_markup=cancel_kb())
+        await message.answer("Название привычки:", reply_markup=cancel_kb())
         return
     try:
         habit = await db.add_habit(message.from_user.id, name)
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=main_menu())
+        await message.answer(str(exc), reply_markup=habits_menu())
         return
     if habit is None:
-        await message.answer("Уже есть.", reply_markup=main_menu())
+        await message.answer("Уже есть.", reply_markup=habits_menu())
         return
     await message.answer(
         f"+ {format_habit_line(habit)}\nдни/время — через ✏️",
-        reply_markup=main_menu(),
+        reply_markup=habits_menu(),
     )
 
 
@@ -200,17 +224,17 @@ async def add_days_text(message: Message, state: FSMContext) -> None:
     if t == "Каждый день":
         await state.update_data(days_mask=ALL_DAYS_MASK)
         await state.set_state(AddHabit.time)
-        await message.answer("Время (или пропуск):", reply_markup=time_step_kb())
+        await message.answer("Время напоминания, ЧЧ:ММ (или пропуск):", reply_markup=time_step_kb())
         return
     if t == "Будни":
         await state.update_data(days_mask="01234")
         await state.set_state(AddHabit.time)
-        await message.answer("Время (или пропуск):", reply_markup=time_step_kb())
+        await message.answer("Время напоминания, ЧЧ:ММ (или пропуск):", reply_markup=time_step_kb())
         return
     if t == "Выходные":
         await state.update_data(days_mask="56")
         await state.set_state(AddHabit.time)
-        await message.answer("Время (или пропуск):", reply_markup=time_step_kb())
+        await message.answer("Время напоминания, ЧЧ:ММ (или пропуск):", reply_markup=time_step_kb())
         return
     if t == "Выбрать дни":
         data = await state.get_data()
@@ -254,7 +278,7 @@ async def cb_add_days(query: CallbackQuery, state: FSMContext) -> None:
         await state.update_data(days_mask=mask)
         await state.set_state(AddHabit.time)
         await query.message.edit_text(f"Дни: {format_days(mask)}")
-        await query.message.answer("Время (или пропуск):", reply_markup=time_step_kb())
+        await query.message.answer("Время напоминания, ЧЧ:ММ (или пропуск):", reply_markup=time_step_kb())
         await query.answer()
         return
     else:
@@ -285,7 +309,7 @@ async def add_time(message: Message, state: FSMContext) -> None:
             return
     await state.update_data(schedule_time=schedule_time)
     await state.set_state(AddHabit.note)
-    await message.answer("Заметка (или пропуск):", reply_markup=note_step_kb())
+    await message.answer("Заметка, например что делать (или пропуск):", reply_markup=note_step_kb())
 
 
 @router.message(StateFilter(AddHabit.note), F.text)
@@ -310,18 +334,18 @@ async def add_note(message: Message, state: FSMContext, db: Database) -> None:
         )
     except ValueError as exc:
         await state.clear()
-        await message.answer(str(exc), reply_markup=main_menu())
+        await message.answer(str(exc), reply_markup=habits_menu())
         return
     await state.clear()
     if habit is None:
-        await message.answer("Уже есть.", reply_markup=main_menu())
+        await message.answer("Уже есть.", reply_markup=habits_menu())
         return
     extra = ""
     if habit.get("schedule_time") and habit.get("remind"):
         extra = f"\n🔔 {habit['schedule_time']} · {format_days(habit.get('days_mask'))}"
     await message.answer(
         f"+ {format_habit_line(habit)}{extra}",
-        reply_markup=main_menu(),
+        reply_markup=habits_menu(),
     )
 
 
@@ -421,7 +445,7 @@ async def btn_delete(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
     habits = await db.list_habits(message.from_user.id)
     if not habits:
-        await message.answer("Пусто.", reply_markup=main_menu())
+        await message.answer("Пусто.", reply_markup=habits_menu())
         return
     await message.answer("Удалить:", reply_markup=habits_inline(habits, "delete"))
 
@@ -433,11 +457,11 @@ async def cmd_delete(message: Message, command: CommandObject, state: FSMContext
     name = (command.args or "").strip()
     if name:
         ok = await db.archive_habit(message.from_user.id, name)
-        await message.answer("Удалено." if ok else "Нет.", reply_markup=main_menu())
+        await message.answer("Удалено." if ok else "Нет.", reply_markup=habits_menu())
         return
     habits = await db.list_habits(message.from_user.id)
     if not habits:
-        await message.answer("Пусто.", reply_markup=main_menu())
+        await message.answer("Пусто.", reply_markup=habits_menu())
         return
     await message.answer("Удалить:", reply_markup=habits_inline(habits, "delete"))
 
@@ -473,7 +497,7 @@ async def btn_edit(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
     habits = await db.list_habits(message.from_user.id)
     if not habits:
-        await message.answer("Пусто.", reply_markup=main_menu())
+        await message.answer("Пусто.", reply_markup=habits_menu())
         return
     await message.answer("Что править?", reply_markup=habits_inline(habits, "editpick"))
 
@@ -689,14 +713,14 @@ async def edit_time_msg(message: Message, state: FSMContext, db: Database) -> No
     try:
         h = await db.update_habit(message.from_user.id, habit_id, schedule_time=new_time)
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=main_menu())
+        await message.answer(str(exc), reply_markup=habits_menu())
         await state.clear()
         return
     await state.clear()
     if not h:
-        await message.answer("Нет.", reply_markup=main_menu())
+        await message.answer("Нет.", reply_markup=habits_menu())
         return
-    await message.answer(f"Ок · {format_habit_line(h)}", reply_markup=main_menu())
+    await message.answer(f"Ок · {format_habit_line(h)}", reply_markup=habits_menu())
 
 
 @router.message(StateFilter(EditHabit.note), F.text)
@@ -712,14 +736,14 @@ async def edit_note_msg(message: Message, state: FSMContext, db: Database) -> No
     try:
         h = await db.update_habit(message.from_user.id, habit_id, note=note)
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=main_menu())
+        await message.answer(str(exc), reply_markup=habits_menu())
         await state.clear()
         return
     await state.clear()
     if not h:
-        await message.answer("Нет.", reply_markup=main_menu())
+        await message.answer("Нет.", reply_markup=habits_menu())
         return
-    await message.answer(f"Ок · {format_habit_line(h)}", reply_markup=main_menu())
+    await message.answer(f"Ок · {format_habit_line(h)}", reply_markup=habits_menu())
 
 
 @router.message(StateFilter(EditHabit.name), F.text)
@@ -733,14 +757,14 @@ async def edit_name_msg(message: Message, state: FSMContext, db: Database) -> No
     try:
         h = await db.update_habit(message.from_user.id, habit_id, name=message.text)
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=main_menu())
+        await message.answer(str(exc), reply_markup=habits_menu())
         await state.clear()
         return
     await state.clear()
     if not h:
-        await message.answer("Нет.", reply_markup=main_menu())
+        await message.answer("Нет.", reply_markup=habits_menu())
         return
-    await message.answer(f"Ок · {format_habit_line(h)}", reply_markup=main_menu())
+    await message.answer(f"Ок · {format_habit_line(h)}", reply_markup=habits_menu())
 
 
 # ----- reminders -----
@@ -843,10 +867,10 @@ async def cmd_habits(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
     habits = await db.list_habits(message.from_user.id)
     if not habits:
-        await message.answer("Пусто.", reply_markup=main_menu())
+        await message.answer("Пусто.", reply_markup=habits_menu())
         return
     lines = [f"• {format_habit_line(h)}" for h in habits]
-    await message.answer("\n".join(lines), reply_markup=main_menu())
+    await message.answer("\n".join(lines), reply_markup=habits_menu())
 
 
 @router.message(Command("today"))
@@ -876,7 +900,7 @@ async def cmd_stats(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
     rows = await db.stats(message.from_user.id)
     if not rows:
-        await message.answer("Пусто.", reply_markup=main_menu())
+        await message.answer("Пусто.", reply_markup=habits_menu())
         return
     lines = []
     for r in rows:
@@ -885,13 +909,14 @@ async def cmd_stats(message: Message, state: FSMContext, db: Database) -> None:
         lines.append(
             f"• {r['name']}{pause}: стрик {r['streak']}{record} · нед {r['week']} · всего {r['total']}"
         )
-    await message.answer("\n".join(lines), reply_markup=main_menu())
+    await message.answer("\n".join(lines), reply_markup=habits_menu())
 
 
 # ----- export -----
 
 
 @router.message(Command("export"))
+@router.message(F.text == BTN_EXPORT)
 async def cmd_export(message: Message, state: FSMContext, db: Database) -> None:
     """Dump every check-in as a CSV file — for backup or for poking at the
     numbers yourself outside Telegram (e.g. a spreadsheet or a small script)."""
@@ -899,7 +924,7 @@ async def cmd_export(message: Message, state: FSMContext, db: Database) -> None:
     await state.clear()
     rows = await db.export_rows(message.from_user.id)
     if not rows:
-        await message.answer("Пока нечего экспортировать.", reply_markup=main_menu())
+        await message.answer("Пока нечего экспортировать.", reply_markup=habits_menu())
         return
     buf = io.StringIO()
     writer = csv.writer(buf)

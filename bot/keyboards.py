@@ -10,13 +10,16 @@ from aiogram.types import (
 from bot.db import DAY_LABELS, format_days, normalize_days_mask
 
 BTN_TODAY = "✅ Сегодня"
-BTN_STATS = "📊 Стата"
+BTN_STATS = "📊 Статистика"
 BTN_HABITS = "📋 Список"
 BTN_ADD = "➕ Добавить"
 BTN_DONE = "✔️ Отметить"
 BTN_EDIT = "✏️ Править"
 BTN_DELETE = "🗑 Удалить"
-BTN_REMINDERS = "🔔 Напомин."
+BTN_EXPORT = "📤 Экспорт"
+BTN_REMINDERS = "🔔 Напоминания"
+BTN_MANAGE = "📋 Привычки"
+BTN_BACK = "◀️ Назад"
 BTN_HELP = "❓"
 BTN_CANCEL = "❌ Отмена"
 BTN_SKIP = "⏭ Пропуск"
@@ -35,12 +38,28 @@ TIMEZONES = [
 
 
 def main_menu() -> ReplyKeyboardMarkup:
+    """Top level: only what you'd use every day, plus the two section
+    entry points (Привычки, Напоминания). Everything else lives one tap
+    deeper in habits_menu()."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text=BTN_TODAY), KeyboardButton(text=BTN_DONE)],
+            [KeyboardButton(text=BTN_MANAGE), KeyboardButton(text=BTN_REMINDERS)],
+            [KeyboardButton(text=BTN_CANCEL), KeyboardButton(text=BTN_HELP)],
+        ],
+        resize_keyboard=True,
+    )
+
+
+def habits_menu() -> ReplyKeyboardMarkup:
+    """Привычки section: everything that manages habits rather than just
+    using them day-to-day (add/list/edit/delete/stats/export)."""
+    return ReplyKeyboardMarkup(
+        keyboard=[
             [KeyboardButton(text=BTN_ADD), KeyboardButton(text=BTN_HABITS)],
-            [KeyboardButton(text=BTN_EDIT), KeyboardButton(text=BTN_REMINDERS)],
-            [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_DELETE), KeyboardButton(text=BTN_HELP)],
+            [KeyboardButton(text=BTN_EDIT), KeyboardButton(text=BTN_DELETE)],
+            [KeyboardButton(text=BTN_STATS), KeyboardButton(text=BTN_EXPORT)],
+            [KeyboardButton(text=BTN_BACK)],
         ],
         resize_keyboard=True,
     )
